@@ -128,7 +128,7 @@ class ClassCompiler(
     if (!instSpec.doc.isEmpty)
       lang.attributeDoc(instName, instSpec.doc)
     lang.instanceHeader(className, instName, dataType)
-    lang.instanceCheckCacheAndReturn(instName)
+    lang.instanceCheckCacheAndReturn(instName, dataType)
 
     instSpec match {
       case vi: ValueInstanceSpec =>
@@ -140,7 +140,7 @@ class ClassCompiler(
     }
 
     lang.instanceSetCalculated(instName)
-    lang.instanceReturn(instName)
+    lang.instanceReturn(instName, dataType)
     lang.instanceFooter
   }
 

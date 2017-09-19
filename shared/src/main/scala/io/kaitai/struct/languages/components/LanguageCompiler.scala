@@ -106,8 +106,8 @@ abstract class LanguageCompiler(
   def instanceDeclaration(attrName: InstanceIdentifier, attrType: DataType, condSpec: ConditionalSpec) = attributeDeclaration(attrName, attrType, condSpec)
   def instanceHeader(className: List[String], instName: InstanceIdentifier, dataType: DataType): Unit
   def instanceFooter: Unit
-  def instanceCheckCacheAndReturn(instName: InstanceIdentifier): Unit
-  def instanceReturn(instName: InstanceIdentifier): Unit
+  def instanceCheckCacheAndReturn(instName: InstanceIdentifier, dataType: DataType): Unit
+  def instanceReturn(instName: InstanceIdentifier, dataType: DataType): Unit
   def instanceCalculate(instName: InstanceIdentifier, dataType: DataType, value: Ast.expr)
 
   def enumDeclaration(curClass: List[String], enumName: String, enumColl: Seq[(Long, String)]): Unit
