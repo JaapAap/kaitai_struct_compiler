@@ -47,6 +47,12 @@ class ClassCompiler(
     extraAttrs += AttrSpec(List(), RootIdentifier, UserTypeInstream(topClassName, None))
     extraAttrs += AttrSpec(List(), ParentIdentifier, UserTypeInstream(curClass.parentTypeName, None))
 
+    // make instance and attribute types available to the compilers when applicable
+    // the order of these calls is important
+    curClass.instances.foreach { case (instName, instSpec) => storeInstanceTypes(curClass.name, instName, instSpec, extraAttrs) }
+    val currentAttributesSeq = curClass.seq ++ extraAttrs;
+    currentAttributesSeq.foreach((attr) => lang.storeAttributeType(attr.id, attr.dataTypeComposite, attr.cond))
+
     // Forward declarations for recursive types
     curClass.types.foreach { case (typeName, _) => lang.classForwardDeclaration(List(typeName)) }
 
@@ -57,7 +63,7 @@ class ClassCompiler(
       lang.debugClassSequence(curClass.seq)
 
     lang.classConstructorHeader(curClass.name, curClass.parentTypeName, topClassName)
-    curClass.instances.foreach { case (instName, _) => lang.instanceClear(instName) }
+    curClass.instances.foreach { case (instName, _) => lang.instanceClear(instName) } // clears flags for cached instances
     compileSeq(curClass.seq, extraAttrs)
     lang.classConstructorFooter
 
@@ -74,11 +80,17 @@ class ClassCompiler(
     // Recursive types
     if (lang.innerClasses) {
       compileSubclasses(curClass)
-
+      // reprocess attribute types as some (like parent and roots) have been overwritten during subclass compilation
+      // due to the fact that the same attribute ids can occur in the subclass and the compiler
+      // keeps a 'global list' of attribute types
+      currentAttributesSeq.foreach((attr) => lang.storeAttributeType(attr.id, attr.dataTypeComposite, attr.cond))
       provider.nowClass = curClass
     }
 
     curClass.instances.foreach { case (instName, instSpec) => compileInstance(curClass.name, instName, instSpec, extraAttrs) }
+
+    // store additional types for attributes that have become available through the instance compilations
+    extraAttrs.foreach((attr) => lang.storeAttributeType(attr.id, attr.dataTypeComposite, attr.cond))
 
     // Attributes declarations and readers
     (curClass.seq ++ extraAttrs).foreach((attr) => lang.attributeDeclaration(attr.id, attr.dataTypeComposite, attr.cond))
@@ -142,6 +154,18 @@ class ClassCompiler(
     lang.instanceSetCalculated(instName)
     lang.instanceReturn(instName, dataType)
     lang.instanceFooter
+  }
+
+  def storeInstanceTypes(className: List[String], instName: InstanceIdentifier, instSpec: InstanceSpec, extraAttrs: ListBuffer[AttrSpec]): Unit = {
+    // Determine datatype
+    val dataType = instSpec.dataTypeComposite
+
+    // Declare caching variable
+    val condSpec = instSpec match {
+      case vis: ValueInstanceSpec => ConditionalSpec(vis.ifExpr, NoRepeat)
+      case pis: ParseInstanceSpec => pis.cond
+    }
+    lang.storeInstanceType(instName, dataType, condSpec)
   }
 
   def compileEnum(curClass: ClassSpec, enumColl: EnumSpec): Unit = {

@@ -9,10 +9,14 @@ import io.kaitai.struct.format._
 import io.kaitai.struct.languages.components._
 import io.kaitai.struct.translators.{CppTranslator, TypeDetector, TypeProvider}
 
-object TypeUse extends Enumeration {
+object TypeUsage extends Enumeration {
   val Default, Undefined,
     InstanceDeclarationType, RootParentDeclarationType, AttributeDeclarationType, LocalVarType,
     ReturnType = Value
+}
+
+object CppStorageType extends Enumeration {
+  val Undefined, Stack, ArrayOfScalar, RawPointer, UniquePointer = Value
 }
 
 class CppCompiler(
@@ -28,6 +32,47 @@ class CppCompiler(
 
   val outSrc = new StringLanguageOutputWriter(indent)
   val outHdr = new StringLanguageOutputWriter(indent)
+
+  var identifierToNativeTypeTable = scala.collection.mutable.Map[Identifier,String]()
+
+  def cppType(id: Identifier): String = {
+    if (identifierToNativeTypeTable.contains(id)) {
+      identifierToNativeTypeTable(id)
+    } else {
+      s"Undefined [id = ${id}]"
+    }
+  }
+
+  def cppStorageType(cppType : String) : CppStorageType.Value = {
+    if (isUniquePointerType(cppType)) {
+      CppStorageType.UniquePointer
+    } else if (isPointerType(cppType)){
+      CppStorageType.RawPointer
+    } else {
+      CppStorageType.Stack
+    }
+  }
+
+  def cppPointeeType(id : Identifier) : String = {
+    val T = cppType(id)
+    val ErrorMsg = "no_pointee_error"
+
+    if (isUniquePointerType(T)) {
+      val TemplateArgPattern = "<[a-zA-Z0-9_:]+>".r
+      val Arg = TemplateArgPattern.findFirstIn(T).getOrElse(s"<$ErrorMsg>")
+      Arg.substring(1,Arg.size-1)
+    } else if (isPointerType(T)){
+      s"*$T"
+    } else {
+      ErrorMsg
+    }
+  }
+
+  def cppStorageType(id: Identifier) : CppStorageType.Value = cppStorageType(cppType(id))
+
+  def storeIdentifierType(id: Identifier, cppType: String) : Unit = {
+    identifierToNativeTypeTable += (id->cppType)
+  }
 
   override def results(topClass: ClassSpec): Map[String, String] = {
     val fn = topClass.nameAsStr
@@ -45,6 +90,10 @@ class CppCompiler(
   // helper function used in establishing whether a type is a pointer
   def isPointerType(typeString: String) : Boolean = {
     (typeString.trim().takeRight(1) ==  "*")
+  }
+
+  def isUniquePointerType(typeString: String) : Boolean = {
+    typeString.trim().startsWith("std::unique_ptr")
   }
 
   override def getStatic = CppCompiler
@@ -135,8 +184,8 @@ class CppCompiler(
     outHdr.puts
     outHdr.puts(s"${types2class(List(name.last))}(" +
       s"$kstreamName* p_io, " +
-      s"${types2class(parentClassName)}* p_parent = 0, " +
-      s"${types2class(rootClassName)}* p_root = 0);"
+      s"${types2class(parentClassName)}* p_parent = nullptr, " +
+      s"${types2class(rootClassName)}* p_root = nullptr);"
     )
 
     outSrc.puts
@@ -169,13 +218,25 @@ class CppCompiler(
 
   override def classDestructorFooter = classConstructorFooter
 
+  override def storeAttributeType(attrName: Identifier, attrType: DataType, condSpec: ConditionalSpec): Unit = {
+    if (isRootOrParent(attrName)) {
+      val CppType = kaitaiType2NativeType(attrType, false, TypeUsage.RootParentDeclarationType)
+      storeIdentifierType(attrName, CppType)
+    } else {
+      val CppType = kaitaiType2NativeType(attrType, false, TypeUsage.AttributeDeclarationType)
+      storeIdentifierType(attrName, CppType)
+    }
+  }
+
+  override def storeInstanceType(attrName: InstanceIdentifier, attrType: DataType, condSpec: ConditionalSpec): Unit = {
+    val CppType = kaitaiType2NativeType(attrType,false, TypeUsage.InstanceDeclarationType)
+    storeIdentifierType(attrName, CppType)
+  }
+
   override def attributeDeclaration(attrName: Identifier, attrType: DataType, condSpec: ConditionalSpec): Unit = {
     ensureMode(PrivateAccess)
-    if (isRootOrParent(attrName)) {
-      outHdr.puts(s"${kaitaiType2NativeType(attrType, false, TypeUse.RootParentDeclarationType)} ${privateMemberName(attrName)};")
-    } else {
-      outHdr.puts(s"${kaitaiType2NativeType(attrType, false, TypeUse.AttributeDeclarationType)} ${privateMemberName(attrName)};")
-    }
+    var declaredType = cppType(attrName)
+    outHdr.puts(s"${declaredType} ${privateMemberName(attrName)};")
     declareNullFlag(attrName, condSpec)
   }
 
@@ -194,7 +255,7 @@ class CppCompiler(
 
   override def attributeReader(attrName: Identifier, attrType: DataType, condSpec: ConditionalSpec): Unit = {
     ensureMode(PublicAccess)
-    val ReturnType = kaitaiType2NativeType(attrType,false,TypeUse.ReturnType)
+    val ReturnType = kaitaiType2NativeType(attrType,false,TypeUsage.ReturnType)
     if (isPointerType(ReturnType) && !(isRootOrParent(attrName))) {
       outHdr.puts(s"${ReturnType} ${publicMemberName(attrName)}() const { return ${privateMemberName(attrName)}.get(); }")
     } else {
@@ -384,8 +445,8 @@ class CppCompiler(
     if (needRaw) {
       outSrc.puts(s"${privateMemberName(RawIdentifier(id))} = std::make_unique<std::string>();")
     }
-        //-->see repeat_eos_struct.cpp
-    outSrc.puts(s"${privateMemberName(id)} = std::make_unique<std::vector<${kaitaiType2NativeType(dataType,false,TypeUse.InstanceDeclarationType)}>>();")
+    val CppInnerType = kaitaiType2NativeType(dataType,false,TypeUsage.InstanceDeclarationType)
+    outSrc.puts(s"${privateMemberName(id)} = std::make_unique<std::vector<$CppInnerType>>();")
     outSrc.puts(s"while (!$io->is_eof()) {")
     outSrc.inc
   }
@@ -406,7 +467,8 @@ class CppCompiler(
       outSrc.puts(s"${privateMemberName(RawIdentifier(id))} = std::make_unique<std::vector<std::string>>();")
       outSrc.puts(s"${privateMemberName(RawIdentifier(id))}->reserve($lenVar);")
     }
-    outSrc.puts(s"${privateMemberName(id)} = std::make_unique<std::vector<${kaitaiType2NativeType(dataType,false,TypeUse.InstanceDeclarationType)}>>();");
+    val CppInnerType = kaitaiType2NativeType(dataType,false,TypeUsage.InstanceDeclarationType)
+    outSrc.puts(s"${privateMemberName(id)} = std::make_unique<std::vector<$CppInnerType>>();");
     outSrc.puts(s"${privateMemberName(id)}->reserve($lenVar);")
     outSrc.puts(s"for (int i = 0; i < $lenVar; i++) {")
     outSrc.inc
@@ -425,10 +487,16 @@ class CppCompiler(
     if (needRaw) {
       outSrc.puts(s"${privateMemberName(RawIdentifier(id))} = std::make_unique<std::vector<std::string>>();")
     }
-    outSrc.puts(s"${privateMemberName(id)} = std::make_unique<std::vector<${kaitaiType2NativeType(dataType,false,TypeUse.InstanceDeclarationType)}>>();")
+
+    var CppInnerType = kaitaiType2NativeType(dataType,false,TypeUsage.InstanceDeclarationType)
+
+    outSrc.puts(s"${privateMemberName(id)} = std::make_unique<std::vector<$CppInnerType>>();")
     outSrc.puts("{")
     outSrc.inc
-    outSrc.puts(s"${kaitaiType2NativeType(dataType,false,TypeUse.LocalVarType)} ${translator.doName("_")};") // allocates local variable
+
+    val CppLocalType = kaitaiType2NativeType(dataType,false,TypeUsage.LocalVarType)
+
+    outSrc.puts(s"$CppLocalType ${translator.doName("_")};") // allocates local variable
     outSrc.puts("do {")
     outSrc.inc
   }
@@ -446,7 +514,7 @@ class CppCompiler(
     } else {
       outSrc.puts(s"${privateMemberName(id)}->push_back($expr);")
 
-      // PBO: type info is missing, hence this less-than-elegant hack...
+      // Note: cppStorageType(id) is not yet useable
       if (expr.startsWith("std::make_unique")) {
         outSrc.puts(s"$tempVar = ${privateMemberName(id)}->back().get();")
       } else {
@@ -464,8 +532,13 @@ class CppCompiler(
   }
 
   override def handleAssignmentSimple(id: Identifier, expr: String): Unit = {
-    outSrc.puts(s"// generated by call to handleAssignmentSimple: ")
-    outSrc.puts(s"${privateMemberName(id)} = $expr;")
+    val MemberId = privateMemberName(id)
+
+    if (expr.startsWith("std::make_unique") ||  (cppStorageType(id) != CppStorageType.UniquePointer)) {
+      outSrc.puts(s"$MemberId = $expr;")
+    } else {
+      outSrc.puts(s"$MemberId = std::make_unique<${cppPointeeType(id)}>(*$expr);")
+    }
   }
 
   override def parseExpr(dataType: DataType, io: String): String = {
@@ -499,10 +572,10 @@ class CppCompiler(
         // This works with the current set of unit tests but
         //  this test might need to be generalized
         if (t.isInstanceOf[UserTypeInstream]) {
-          s"std::make_unique<${types2class(t.name)}>($io$addArgs)"
+          s"std::make_unique<${types2class(t.name)}>($io$addArgs) /* io: $io */"
         } else {
           //
-          s"std::make_unique<${types2class(t.name)}>($io.get()$addArgs)"
+          s"std::make_unique<${types2class(t.name)}>($io.get()$addArgs) /* io: $io */"
         }
     }
   }
@@ -539,7 +612,7 @@ class CppCompiler(
       outSrc.inc
       // PBO: the way the type is used is set to default, which at least works with
       // the current set of unit tests
-      outSrc.puts(s"${kaitaiType2NativeType(onType,false,TypeUse.Default)} on = ${expression(on)};")
+      outSrc.puts(s"${kaitaiType2NativeType(onType,false,TypeUsage.Default)} on = ${expression(on)};")
     } else {
       outSrc.puts(s"switch (${expression(on)}) {")
     }
@@ -597,16 +670,17 @@ class CppCompiler(
 
   override def instanceDeclaration(attrName: InstanceIdentifier, attrType: DataType, condSpec: ConditionalSpec): Unit = {
     ensureMode(PrivateAccess)
+    var declaredType = kaitaiType2NativeType(attrType,false, TypeUsage.InstanceDeclarationType)
     outHdr.puts(s"bool ${calculatedFlagForName(attrName)};")
-    outHdr.puts(s"${kaitaiType2NativeType(attrType,false, TypeUse.InstanceDeclarationType)} ${privateMemberName(attrName)};")
+    outHdr.puts(s"${declaredType} ${privateMemberName(attrName)};")
     declareNullFlag(attrName, condSpec)
   }
 
   override def instanceHeader(className: List[String], instName: InstanceIdentifier, dataType: DataType): Unit = {
     ensureMode(PublicAccess)
-    outHdr.puts(s"${kaitaiType2NativeType(dataType,false,TypeUse.ReturnType)} ${publicMemberName(instName)}();")
+    outHdr.puts(s"${kaitaiType2NativeType(dataType,absolute = false,TypeUsage.ReturnType)} ${publicMemberName(instName)}();")
     outSrc.puts
-    outSrc.puts(s"${kaitaiType2NativeType(dataType, true, TypeUse.ReturnType)} ${types2class(className)}::${publicMemberName(instName)}() {")
+    outSrc.puts(s"${kaitaiType2NativeType(dataType,true, TypeUsage.ReturnType)} ${types2class(className)}::${publicMemberName(instName)}() {")
     outSrc.inc
   }
 
@@ -625,7 +699,7 @@ class CppCompiler(
   }
 
   override def instanceReturn(instName: InstanceIdentifier, dataType: DataType): Unit = {
-    val ReturnType = kaitaiType2NativeType(dataType, true, TypeUse.ReturnType);
+    val ReturnType = kaitaiType2NativeType(dataType, true, TypeUsage.ReturnType);
     if (isPointerType(ReturnType)) {
       outSrc.puts(s"return ${privateMemberName(instName)}.get();")
     } else {
@@ -713,7 +787,7 @@ object CppCompiler extends LanguageCompilerStatic with StreamStructNames {
     }.mkString("::")
   }
 
-  def kaitaiType2NativeType(attrType: DataType, absolute: Boolean = false, typeUse: TypeUse.Value = TypeUse.Default): String = {
+  def kaitaiType2NativeType(attrType: DataType, absolute: Boolean = false, typeUse: TypeUsage.Value = TypeUsage.Default): String = {
 
     attrType match {
 
@@ -747,7 +821,7 @@ object CppCompiler extends LanguageCompilerStatic with StreamStructNames {
         } else {
           t.name
         })
-        if ((typeUse == TypeUse.InstanceDeclarationType) || (typeUse == TypeUse.AttributeDeclarationType)) {
+        if ((typeUse == TypeUsage.InstanceDeclarationType) || (typeUse == TypeUsage.AttributeDeclarationType)) {
           s"std::unique_ptr<$typeStr>"
         } else {
           s"$typeStr*"
@@ -761,21 +835,21 @@ object CppCompiler extends LanguageCompilerStatic with StreamStructNames {
         })
 
       case ArrayType(inType) =>
-        if (typeUse == TypeUse.ReturnType) {
-          s"std::vector<${kaitaiType2NativeType(inType, absolute, TypeUse.InstanceDeclarationType)}>*"
+        if (typeUse == TypeUsage.ReturnType) {
+          s"std::vector<${kaitaiType2NativeType(inType, absolute, TypeUsage.InstanceDeclarationType)}>*"
         } else {
           s"std::unique_ptr<std::vector<${kaitaiType2NativeType(inType, absolute, typeUse)}>>"
         }
 
       case KaitaiStreamType =>
-       if (typeUse == TypeUse.ReturnType) {
+       if (typeUse == TypeUsage.ReturnType) {
          s"$kstreamName*"
        } else {
           s"std::unique_ptr<$kstreamName>"
         }
 
       case KaitaiStructType =>
-        if (typeUse == TypeUse.ReturnType) {
+        if (typeUse == TypeUsage.ReturnType) {
           s"$kstructName*"
         } else {
           s"std::unique_ptr<$kstructName>"

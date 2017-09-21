@@ -69,6 +69,9 @@ abstract class LanguageCompiler(
   def classDestructorHeader(name: List[String], parentTypeName: List[String], topClassName: List[String]): Unit = {}
   def classDestructorFooter: Unit = {}
 
+  def storeAttributeType(attrName: Identifier, attrType: DataType, condSpec: ConditionalSpec): Unit = {}
+  def storeInstanceType(attrName: InstanceIdentifier, attrType: DataType, condSpec: ConditionalSpec): Unit = {}
+
   def attributeDeclaration(attrName: Identifier, attrType: DataType, condSpec: ConditionalSpec): Unit
   def attributeReader(attrName: Identifier, attrType: DataType, condSpec: ConditionalSpec): Unit
   def attributeDoc(id: Identifier, doc: DocSpec): Unit = {}
